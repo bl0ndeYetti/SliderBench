@@ -1,0 +1,834 @@
+LLM Sliding Puzzle Benchmark – Codebase
+
+Below is a minimal but complete implementation of the AI-only sliding tile puzzle benchmark using a Python backend and Vercel AI Gateway.
+
+The code is organized as a small backend package with:
+	•	config.py – configuration and constants
+	•	models.py – data models (Pydantic, enums)
+	•	game_engine.py – pure puzzle logic
+	•	llm_client.py – Vercel AI Gateway client
+	•	orchestrator.py – benchmark run loop
+	•	api.py – HTTP API (FastAPI app)
+	•	main.py – CLI entry point for batch benchmarks
+
+You can split these into separate files in a backend/ directory.
+
+⸻
+
+config.py
+
+# config.py
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+
+
+AI_GATEWAY_BASE_URL = os.getenv("AI_GATEWAY_BASE_URL", "https://ai-gateway.vercel.sh/v1")
+AI_GATEWAY_API_KEY = os.getenv("AI_GATEWAY_API_KEY", "")
+
+# Default model ID routed through Vercel AI Gateway.
+# Example: "openai/gpt-4.1-mini" or any configured model string.
+DEFAULT_MODEL_ID = os.getenv("DEFAULT_MODEL_ID", "openai/gpt-4.1-mini")
+
+
+@dataclass
+class BenchmarkConfig:
+    model_id: str = DEFAULT_MODEL_ID
+    size: int = 4
+    max_moves: int = 200
+    scramble_depth: int = 50
+    retry_on_parse_failure: int = 1
+    retry_on_illegal_move: int = 0
+
+
+DEFAULT_BENCHMARK_CONFIG = BenchmarkConfig()
+
+
+⸻
+
+models.py
+
+# models.py
+from __future__ import annotations
+
+from enum import Enum
+from typing import List, Optional, Literal, Any
+from datetime import datetime
+from pydantic import BaseModel, Field
+
+
+class MoveDirection(str, Enum):
+    up = "up"
+    down = "down"
+    left = "left"
+    right = "right"
+
+
+Board = List[List[Optional[int]]]
+
+
+class GameStatus(str, Enum):
+    in_progress = "in_progress"
+    solved = "solved"
+    error = "error"
+
+
+class RunStatus(str, Enum):
+    in_progress = "in_progress"
+    solved = "solved"
+    failed = "failed"
+    aborted = "aborted"
+
+
+class GameState(BaseModel):
+    game_id: str
+    size: int
+    initial_board: Board
+    current_board: Board
+    status: GameStatus = GameStatus.in_progress
+    move_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class BenchmarkRun(BaseModel):
+    run_id: str
+    game_id: str
+    model_id: str
+    max_moves: int
+    status: RunStatus = RunStatus.in_progress
+    created_at: datetime
+    updated_at: datetime
+
+
+class MoveRecord(BaseModel):
+    run_id: str
+    move_index: int
+    model_id: str
+    request_id: Optional[str] = None
+    pre_board: Board
+    suggested_move: Optional[MoveDirection] = None
+    raw_suggested: Optional[str] = None
+    is_parsed: bool = False
+    is_legal: bool = False
+    post_board: Optional[Board] = None
+    error_type: Optional[str] = None
+    timestamp: datetime
+
+
+class LLMCallRecord(BaseModel):
+    request_id: str
+    run_id: str
+    model_id: str
+    type: Literal["autoMove"]
+    request_payload_summary: str
+    raw_response: Any
+    latency_ms: float
+    token_usage: Optional[dict] = None
+
+
+class RunSummary(BaseModel):
+    run_id: str
+    model_id: str
+    size: int
+    initial_board: Board
+    final_board: Board
+    status: RunStatus
+    total_moves: int
+    illegal_move_count: int
+    parse_error_count: int
+    average_latency_ms: float
+    total_tokens: int = 0
+
+
+# API schemas
+
+class CreateRunRequest(BaseModel):
+    model_id: Optional[str] = None
+    size: int = 4
+    max_moves: int = 200
+    scramble_depth: int = 50
+
+
+class CreateRunResponse(BaseModel):
+    run: BenchmarkRun
+    game: GameState
+
+
+class GetRunResponse(BaseModel):
+    run: BenchmarkRun
+    game: GameState
+    last_moves: List[MoveRecord] = Field(default_factory=list)
+
+
+class RunBatchRequest(BaseModel):
+    model_id: Optional[str] = None
+    size: int = 4
+    max_moves: int = 200
+    scramble_depth: int = 50
+    num_runs: int = 10
+
+
+class RunBatchResult(BaseModel):
+    summaries: List[RunSummary]
+
+---
+
+## game_engine.py
+
+```python
+# game_engine.py
+from __future__ import annotations
+
+import random
+from typing import List, Optional, Tuple
+from datetime import datetime
+from uuid import uuid4
+
+from .models import Board, GameState, GameStatus, MoveDirection
+
+
+def create_solved_board(size: int) -> Board:
+    n = size * size
+    tiles = list(range(1, n)) + [None]
+    board: Board = []
+    for i in range(0, n, size):
+        board.append(tiles[i : i + size])
+    return board
+
+
+def find_blank(board: Board) -> Tuple[int, int]:
+    for r, row in enumerate(board):
+        for c, val in enumerate(row):
+            if val is None:
+                return r, c
+    raise ValueError("Blank tile not found")
+
+
+def clone_board(board: Board) -> Board:
+    return [row[:] for row in board]
+
+
+def apply_move(board: Board, move: MoveDirection) -> Board:
+    size = len(board)
+    r, c = find_blank(board)
+    dr, dc = 0, 0
+
+    if move == MoveDirection.up:
+        dr, dc = -1, 0
+    elif move == MoveDirection.down:
+        dr, dc = 1, 0
+    elif move == MoveDirection.left:
+        dr, dc = 0, -1
+    elif move == MoveDirection.right:
+        dr, dc = 0, 1
+
+    nr, nc = r + dr, c + dc
+    if nr < 0 or nr >= size or nc < 0 or nc >= size:
+        raise ValueError("Illegal move: out of bounds")
+
+    new_board = clone_board(board)
+    new_board[r][c], new_board[nr][nc] = new_board[nr][nc], new_board[r][c]
+    return new_board
+
+
+def get_legal_moves(board: Board) -> List[MoveDirection]:
+    size = len(board)
+    r, c = find_blank(board)
+    moves = []
+    if r > 0:
+        moves.append(MoveDirection.up)
+    if r < size - 1:
+        moves.append(MoveDirection.down)
+    if c > 0:
+        moves.append(MoveDirection.left)
+    if c < size - 1:
+        moves.append(MoveDirection.right)
+    return moves
+
+
+def is_valid_board(board: Board) -> bool:
+    size = len(board)
+    flat: List[Optional[int]] = [v for row in board for v in row]
+    if len(flat) != size * size:
+        return False
+    if flat.count(None) != 1:
+        return False
+    nums = [x for x in flat if x is not None]
+    expected = list(range(1, size * size))
+    return sorted(nums) == expected
+
+
+def is_solved(board: Board) -> bool:
+    return board == create_solved_board(len(board))
+
+
+def scramble_board(size: int, depth: int) -> Board:
+    board = create_solved_board(size)
+    last_move = None
+    for _ in range(depth):
+        legal = get_legal_moves(board)
+        if last_move is not None:
+            # Avoid immediately undoing last move
+            opposite = {
+                MoveDirection.up: MoveDirection.down,
+                MoveDirection.down: MoveDirection.up,
+                MoveDirection.left: MoveDirection.right,
+                MoveDirection.right: MoveDirection.left,
+            }[last_move]
+            legal = [m for m in legal if m != opposite]
+        move = random.choice(legal)
+        board = apply_move(board, move)
+        last_move = move
+    return board
+
+
+def create_game(size: int, scramble_depth: int) -> GameState:
+    game_id = str(uuid4())
+    solved = create_solved_board(size)
+    scrambled = scramble_board(size, scramble_depth)
+    now = datetime.utcnow()
+    return GameState(
+        game_id=game_id,
+        size=size,
+        initial_board=scrambled,
+        current_board=scrambled,
+        status=GameStatus.in_progress,
+        move_count=0,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def apply_move_to_game(game: GameState, move: MoveDirection) -> GameState:
+    if game.status != GameStatus.in_progress:
+        return game
+
+    try:
+        new_board = apply_move(game.current_board, move)
+    except ValueError:
+        # Illegal move – caller should treat separately; we do not update state.
+        return game
+
+    if not is_valid_board(new_board):
+        game.status = GameStatus.error
+        game.updated_at = datetime.utcnow()
+        return game
+
+    game.current_board = new_board
+    game.move_count += 1
+    game.updated_at = datetime.utcnow()
+
+    if is_solved(new_board):
+        game.status = GameStatus.solved
+
+    return game
+
+
+⸻
+
+llm_client.py
+
+# llm_client.py
+from __future__ import annotations
+
+import json
+import time
+from typing import Tuple, Optional, Dict, Any
+from uuid import uuid4
+
+import httpx
+
+from .config import AI_GATEWAY_BASE_URL, AI_GATEWAY_API_KEY
+from .models import MoveDirection, Board
+
+
+class LLMClientError(Exception):
+    pass
+
+
+def serialize_board(board: Board) -> str:
+    """Render the board as a compact JSON string for the prompt."""
+    return json.dumps(board)
+
+
+def build_prompt(board: Board, max_moves_remaining: int) -> Dict[str, Any]:
+    board_json = serialize_board(board)
+    system_msg = (
+        "You are solving a sliding tile puzzle (n-puzzle). "
+        "The board is a square grid with numbered tiles and one blank (null). "
+        "On each turn, you may move the blank up, down, left, or right by swapping it with the adjacent tile. "
+        "Your task is to choose the SINGLE next move that best progresses toward the solved state. "
+        "You MUST respond in strict JSON with a single key 'move' whose value is one of: "
+        "'up', 'down', 'left', 'right'. Do not include any other text."
+    )
+
+    user_msg = (
+        "Current board (JSON):\n" + board_json + "\n" +
+        f"You have at most {max_moves_remaining} moves remaining in this run. "
+        "Respond with JSON only, for example: {\"move\": \"up\"}."
+    )
+
+    return {
+        "model": None,  # filled by caller
+        "messages": [
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": user_msg},
+        ],
+        "temperature": 0.0,
+        "max_tokens": 16,
+    }
+
+
+def call_llm_for_move(
+    board: Board,
+    model_id: str,
+    max_moves_remaining: int,
+) -> Tuple[str, Optional[MoveDirection], Optional[Dict[str, Any]], float, Optional[Dict[str, Any]]]:
+    """Call the LLM via Vercel AI Gateway and parse a move.
+
+    Returns (request_id, parsed_move, raw_response_json, latency_ms, token_usage).
+    parsed_move may be None if parsing fails.
+    """
+
+    if not AI_GATEWAY_API_KEY:
+        raise LLMClientError("AI_GATEWAY_API_KEY is not set")
+
+    payload = build_prompt(board, max_moves_remaining)
+    payload["model"] = model_id
+
+    headers = {
+        "Authorization": f"Bearer {AI_GATEWAY_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    url = f"{AI_GATEWAY_BASE_URL}/chat/completions"
+
+    start = time.time()
+    with httpx.Client(timeout=30.0) as client:
+        resp = client.post(url, headers=headers, json=payload)
+    latency_ms = (time.time() - start) * 1000.0
+
+    request_id = str(uuid4())
+
+    if resp.status_code != 200:
+        raise LLMClientError(f"Gateway error {resp.status_code}: {resp.text}")
+
+    data = resp.json()
+
+    # OpenAI-compatible style: choices[0].message.content
+    try:
+        content = data["choices"][0]["message"]["content"]
+    except Exception as e:  # noqa: BLE001
+        raise LLMClientError(f"Unexpected response shape: {e}; data={data!r}")
+
+    token_usage = data.get("usage")
+
+    parsed_move: Optional[MoveDirection] = None
+    try:
+        # content should be JSON like {"move": "up"}
+        obj = json.loads(content)
+        move_str = obj.get("move")
+        if move_str in {m.value for m in MoveDirection}:
+            parsed_move = MoveDirection(move_str)
+    except Exception:
+        parsed_move = None
+
+    return request_id, parsed_move, data, latency_ms, token_usage
+
+
+⸻
+
+orchestrator.py
+
+# orchestrator.py
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Dict, List
+from uuid import uuid4
+
+from .config import BenchmarkConfig, DEFAULT_BENCHMARK_CONFIG
+from .game_engine import create_game, apply_move_to_game
+from .llm_client import call_llm_for_move, LLMClientError
+from .models import (
+    BenchmarkRun,
+    GameState,
+    MoveRecord,
+    LLMCallRecord,
+    RunSummary,
+    RunStatus,
+    GameStatus,
+)
+
+
+class InMemoryStore:
+    """Simple in-memory store for runs, games, and logs.
+
+    In production you'd plug in a real database.
+    """
+
+    def __init__(self) -> None:
+        self.games: Dict[str, GameState] = {}
+        self.runs: Dict[str, BenchmarkRun] = {}
+        self.move_logs: Dict[str, List[MoveRecord]] = {}
+        self.call_logs: Dict[str, List[LLMCallRecord]] = {}
+
+
+store = InMemoryStore()
+
+
+def create_run(config: BenchmarkConfig | None = None) -> tuple[BenchmarkRun, GameState]:
+    if config is None:
+        config = DEFAULT_BENCHMARK_CONFIG
+
+    game = create_game(config.size, config.scramble_depth)
+    run_id = str(uuid4())
+    now = datetime.utcnow()
+
+    run = BenchmarkRun(
+        run_id=run_id,
+        game_id=game.game_id,
+        model_id=config.model_id,
+        max_moves=config.max_moves,
+        status=RunStatus.in_progress,
+        created_at=now,
+        updated_at=now,
+    )
+
+    store.games[game.game_id] = game
+    store.runs[run_id] = run
+    store.move_logs[run_id] = []
+    store.call_logs[run_id] = []
+
+    return run, game
+
+
+def run_single_step(run: BenchmarkRun, config: BenchmarkConfig) -> None:
+    game = store.games[run.game_id]
+
+    if game.status != GameStatus.in_progress or run.status != RunStatus.in_progress:
+        return
+
+    moves_remaining = config.max_moves - game.move_count
+    if moves_remaining <= 0:
+        run.status = RunStatus.failed
+        run.updated_at = datetime.utcnow()
+        return
+
+    try:
+        req_id, parsed_move, raw_resp, latency_ms, token_usage = call_llm_for_move(
+            game.current_board,
+            model_id=config.model_id,
+            max_moves_remaining=moves_remaining,
+        )
+    except LLMClientError as e:
+        # Hard failure for this run
+        run.status = RunStatus.failed
+        run.updated_at = datetime.utcnow()
+        # Minimal call log entry
+        store.call_logs[run.run_id].append(
+            LLMCallRecord(
+                request_id=str(uuid4()),
+                run_id=run.run_id,
+                model_id=config.model_id,
+                type="autoMove",
+                request_payload_summary=f"LLMClientError: {e}",
+                raw_response=None,
+                latency_ms=0.0,
+                token_usage=None,
+            )
+        )
+        return
+
+    # Log the raw call
+    store.call_logs[run.run_id].append(
+        LLMCallRecord(
+            request_id=req_id,
+            run_id=run.run_id,
+            model_id=config.model_id,
+            type="autoMove",
+            request_payload_summary="auto move call",
+            raw_response=raw_resp,
+            latency_ms=latency_ms,
+            token_usage=token_usage,
+        )
+    )
+
+    game_before = game.copy(deep=True)
+
+    move_record = MoveRecord(
+        run_id=run.run_id,
+        move_index=game.move_count,
+        model_id=config.model_id,
+        request_id=req_id,
+        pre_board=game_before.current_board,
+        suggested_move=parsed_move,
+        raw_suggested=str(parsed_move.value if parsed_move else None),
+        is_parsed=parsed_move is not None,
+        is_legal=False,
+        post_board=None,
+        error_type=None,
+        timestamp=datetime.utcnow(),
+    )
+
+    if parsed_move is None:
+        move_record.error_type = "parse_error"
+        store.move_logs[run.run_id].append(move_record)
+        run.status = RunStatus.failed
+        run.updated_at = datetime.utcnow()
+        return
+
+    # Try to apply the move
+    from .game_engine import get_legal_moves
+
+    legal_moves = get_legal_moves(game.current_board)
+    if parsed_move not in legal_moves:
+        move_record.error_type = "illegal_move"
+        store.move_logs[run.run_id].append(move_record)
+        run.status = RunStatus.failed
+        run.updated_at = datetime.utcnow()
+        return
+
+    # Legal move – apply
+    from .game_engine import apply_move
+
+    new_board = apply_move(game.current_board, parsed_move)
+    game.current_board = new_board
+    game.move_count += 1
+    game.updated_at = datetime.utcnow()
+
+    move_record.is_legal = True
+    move_record.post_board = new_board
+    store.move_logs[run.run_id].append(move_record)
+
+    # Check status
+    from .game_engine import is_valid_board, is_solved
+
+    if not is_valid_board(new_board):
+        game.status = GameStatus.error
+        run.status = RunStatus.failed
+    elif is_solved(new_board):
+        game.status = GameStatus.solved
+        run.status = RunStatus.solved
+
+    run.updated_at = datetime.utcnow()
+    store.games[game.game_id] = game
+    store.runs[run.run_id] = run
+
+
+def run_to_completion(config: BenchmarkConfig | None = None) -> RunSummary:
+    if config is None:
+        config = DEFAULT_BENCHMARK_CONFIG
+
+    run, game = create_run(config)
+
+    while (
+        run.status == RunStatus.in_progress
+        and game.status == GameStatus.in_progress
+        and game.move_count < config.max_moves
+    ):
+        run_single_step(run, config)
+        game = store.games[run.game_id]
+
+    # Build summary
+    move_logs = store.move_logs[run.run_id]
+    call_logs = store.call_logs[run.run_id]
+
+    illegal_count = sum(1 for m in move_logs if m.error_type == "illegal_move")
+    parse_count = sum(1 for m in move_logs if m.error_type == "parse_error")
+    avg_latency = (
+        sum(c.latency_ms for c in call_logs) / len(call_logs)
+        if call_logs
+        else 0.0
+    )
+    total_tokens = 0
+    for c in call_logs:
+        usage = c.token_usage or {}
+        total_tokens += int(usage.get("total_tokens", 0))
+
+    summary = RunSummary(
+        run_id=run.run_id,
+        model_id=run.model_id,
+        size=game.size,
+        initial_board=game.initial_board,
+        final_board=game.current_board,
+        status=run.status,
+        total_moves=game.move_count,
+        illegal_move_count=illegal_count,
+        parse_error_count=parse_count,
+        average_latency_ms=avg_latency,
+        total_tokens=total_tokens,
+    )
+
+    return summary
+
+
+def run_batch(
+    config: BenchmarkConfig,
+    num_runs: int,
+) -> List[RunSummary]:
+    summaries: List[RunSummary] = []
+    for _ in range(num_runs):
+        summaries.append(run_to_completion(config))
+    return summaries
+
+
+⸻
+
+api.py
+
+# api.py
+from __future__ import annotations
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+
+from .config import BenchmarkConfig, DEFAULT_BENCHMARK_CONFIG
+from .models import (
+    CreateRunRequest,
+    CreateRunResponse,
+    GetRunResponse,
+    RunBatchRequest,
+    RunBatchResult,
+)
+from .orchestrator import (
+    store,
+    create_run,
+    run_single_step,
+    run_batch,
+)
+from .models import RunStatus
+
+
+app = FastAPI(title="LLM Sliding Puzzle Benchmark")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.post("/runs", response_model=CreateRunResponse)
+async def api_create_run(payload: CreateRunRequest) -> CreateRunResponse:
+    config = BenchmarkConfig(
+        model_id=payload.model_id or DEFAULT_BENCHMARK_CONFIG.model_id,
+        size=payload.size,
+        max_moves=payload.max_moves,
+        scramble_depth=payload.scramble_depth,
+    )
+    run, game = create_run(config)
+    return CreateRunResponse(run=run, game=game)
+
+
+@app.get("/runs/{run_id}", response_model=GetRunResponse)
+async def api_get_run(run_id: str) -> GetRunResponse:
+    run = store.runs.get(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="run not found")
+
+    game = store.games.get(run.game_id)
+    if not game:
+        raise HTTPException(status_code=500, detail="game missing for run")
+
+    moves = store.move_logs.get(run_id, [])
+    return GetRunResponse(run=run, game=game, last_moves=moves[-20:])
+
+
+@app.post("/runs/{run_id}/step")
+async def api_step_run(run_id: str) -> GetRunResponse:
+    run = store.runs.get(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="run not found")
+
+    if run.status != RunStatus.in_progress:
+        # No-op, just return current state
+        game = store.games[run.game_id]
+        moves = store.move_logs.get(run_id, [])
+        return GetRunResponse(run=run, game=game, last_moves=moves[-20:])
+
+    # Build a config from stored run + defaults
+    config = BenchmarkConfig(
+        model_id=run.model_id,
+        size=store.games[run.game_id].size,
+        max_moves=run.max_moves,
+        scramble_depth=0,  # irrelevant when continuing
+    )
+
+    run_single_step(run, config)
+
+    # Refresh
+    run = store.runs[run_id]
+    game = store.games[run.game_id]
+    moves = store.move_logs.get(run_id, [])
+    return GetRunResponse(run=run, game=game, last_moves=moves[-20:])
+
+
+@app.post("/runs/batch", response_model=RunBatchResult)
+async def api_run_batch(payload: RunBatchRequest) -> RunBatchResult:
+    config = BenchmarkConfig(
+        model_id=payload.model_id or DEFAULT_BENCHMARK_CONFIG.model_id,
+        size=payload.size,
+        max_moves=payload.max_moves,
+        scramble_depth=payload.scramble_depth,
+    )
+    summaries = run_batch(config, payload.num_runs)
+    return RunBatchResult(summaries=summaries)
+
+
+⸻
+
+main.py (CLI entry point)
+
+# main.py
+from __future__ import annotations
+
+import argparse
+
+from .config import BenchmarkConfig
+from .orchestrator import run_batch
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run LLM sliding puzzle benchmark")
+    parser.add_argument("--model-id", type=str, default=None, help="Model ID configured in AI Gateway")
+    parser.add_argument("--size", type=int, default=4, help="Board size (e.g., 3, 4, 5)")
+    parser.add_argument("--max-moves", type=int, default=200, help="Max moves per run")
+    parser.add_argument("--scramble-depth", type=int, default=50, help="Scramble depth")
+    parser.add_argument("--num-runs", type=int, default=5, help="Number of runs in the batch")
+
+    args = parser.parse_args()
+
+    config = BenchmarkConfig(
+        model_id=args.model_id or "openai/gpt-4.1-mini",
+        size=args.size,
+        max_moves=args.max_moves,
+        scramble_depth=args.scramble_depth,
+    )
+
+    summaries = run_batch(config, args.num_runs)
+
+    print("Model:", config.model_id)
+    for s in summaries:
+        print("Run:", s.run_id)
+        print("  status:", s.status)
+        print("  size:", s.size)
+        print("  total moves:", s.total_moves)
+        print("  illegal moves:", s.illegal_move_count)
+        print("  parse errors:", s.parse_error_count)
+        print("  avg latency (ms):", round(s.average_latency_ms, 2))
+        print("  total tokens:", s.total_tokens)
+        print()
+
+
+if __name__ == "__main__":  # pragma: no cover
+    main()
+
+
+⸻
+
+This backend is self-contained and ready to be wired to Vercel AI Gateway once you provide AI_GATEWAY_API_KEY and (optionally) AI_GATEWAY_BASE_URL and DEFAULT_MODEL_ID as environment variables.
