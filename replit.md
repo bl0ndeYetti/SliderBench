@@ -100,3 +100,45 @@ Preferred communication style: Simple, everyday language.
 - Development: Concurrent Vite dev server and tsx server execution
 
 **Rationale**: esbuild provides fast server bundling with tree-shaking. The build script bundles frequently-used dependencies (like database clients and LLM SDKs) while externalizing less-critical packages to optimize cold start times in serverless environments.
+
+## Features
+
+### Core Features
+- **Real-time Dashboard**: Live visualization of all active puzzle games with WebSocket updates
+- **Puzzle Board Visualization**: Animated tile movements showing current game state
+- **Game Statistics**: Move count, status, model ID, latency tracking per game
+- **Configuration Panel**: Start new benchmark runs with customizable parameters (model, board size, max moves, scramble depth)
+
+### Batch Run Controls
+- **Multi-Model Testing**: Select multiple LLM models to benchmark simultaneously
+- **Board Size Matrix**: Test across 2x2, 3x3, 4x4, and 5x5 puzzle sizes
+- **Runs Per Config**: Execute multiple runs of each configuration for statistical validity
+
+### Filtering and Search
+- **Text Search**: Filter games by model name or run ID
+- **Status Filter**: View only active, solved, or failed games
+- **Model Filter**: Focus on specific LLM models
+- **Sort Options**: Order by newest, oldest, fewest moves, or most moves
+
+### Analytics Dashboard
+- **Results by Model**: Stacked bar chart showing solved/failed/in-progress per model
+- **Status Distribution**: Pie chart of overall success rates
+- **Results by Board Size**: Performance comparison across puzzle sizes
+- **Average Moves by Model**: Model efficiency comparison
+
+### Game Replay
+- **Step-by-Step Playback**: Watch completed games move-by-move
+- **Play/Pause Controls**: Automatic and manual stepping
+- **Speed Adjustment**: 0.5x to 4x playback speed
+- **Step Slider**: Jump to any point in the game history
+
+## Recent Changes
+
+### November 29, 2025
+- Added batch run controls for testing multiple models and board sizes simultaneously
+- Implemented filter bar with search, status filter, model filter, and sort options
+- Added analytics panel with Recharts visualizations showing model performance
+- Created game replay feature with step-by-step playback controls
+- Fixed React state management issue in dashboard initialization (moved to useEffect)
+- Added NaN guards to statistics calculations to prevent division by zero
+- Added form input validation with value clamping

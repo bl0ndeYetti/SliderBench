@@ -7,7 +7,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
-import { ChevronDown, Clock, Hash, Cpu } from "lucide-react";
+import { ChevronDown, Clock, Hash, Cpu, RotateCcw } from "lucide-react";
 import { PuzzleBoard } from "./puzzle-board";
 import { StatusBadge } from "./status-badge";
 import { MoveHistory } from "./move-history";
@@ -15,9 +15,10 @@ import type { RunWithGame } from "@shared/schema";
 
 interface GameCardProps {
   data: RunWithGame;
+  onReplay?: (data: RunWithGame) => void;
 }
 
-export function GameCard({ data }: GameCardProps) {
+export function GameCard({ data, onReplay }: GameCardProps) {
   const [isExpanded, setIsExpanded] = useState(false);
   const { run, game, moves } = data;
 
@@ -87,24 +88,39 @@ export function GameCard({ data }: GameCardProps) {
           />
         </div>
 
-        <Collapsible open={isExpanded} onOpenChange={setIsExpanded}>
-          <CollapsibleTrigger asChild>
+        <div className="flex items-center gap-2">
+          <Collapsible open={isExpanded} onOpenChange={setIsExpanded} className="flex-1">
+            <CollapsibleTrigger asChild>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="w-full gap-2 text-xs"
+                data-testid="button-toggle-history"
+              >
+                Move History ({moves.length})
+                <ChevronDown
+                  className={`w-3 h-3 transition-transform ${isExpanded ? "rotate-180" : ""}`}
+                />
+              </Button>
+            </CollapsibleTrigger>
+            <CollapsibleContent className="pt-2">
+              <MoveHistory moves={moves} />
+            </CollapsibleContent>
+          </Collapsible>
+
+          {isComplete && onReplay && moves.filter((m) => m.isLegal).length > 0 && (
             <Button
-              variant="ghost"
+              variant="outline"
               size="sm"
-              className="w-full gap-2 text-xs"
-              data-testid="button-toggle-history"
+              onClick={() => onReplay(data)}
+              className="gap-1.5 text-xs"
+              data-testid={`button-replay-${run.runId}`}
             >
-              Move History ({moves.length})
-              <ChevronDown
-                className={`w-3 h-3 transition-transform ${isExpanded ? "rotate-180" : ""}`}
-              />
+              <RotateCcw className="w-3 h-3" />
+              Replay
             </Button>
-          </CollapsibleTrigger>
-          <CollapsibleContent className="pt-2">
-            <MoveHistory moves={moves} />
-          </CollapsibleContent>
-        </Collapsible>
+          )}
+        </div>
       </CardContent>
     </Card>
   );

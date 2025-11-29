@@ -1,15 +1,20 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Puzzle, Activity } from "lucide-react";
+import { Puzzle, Activity, BarChart2 } from "lucide-react";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { useWebSocket } from "@/hooks/use-websocket";
 import { ConfigPanel } from "@/components/config-panel";
+import { BatchConfig } from "@/components/batch-config";
 import { StatsBar } from "@/components/stats-bar";
 import { GameCard } from "@/components/game-card";
 import { ConnectionStatus } from "@/components/connection-status";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { FilterBar, type FilterState } from "@/components/filter-bar";
+import { AnalyticsPanel } from "@/components/analytics-panel";
+import { GameReplay } from "@/components/game-replay";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type {
   CreateRunRequest,
   AllRunsResponse,
@@ -21,6 +26,13 @@ import type {
 export default function Dashboard() {
   const { toast } = useToast();
   const [runs, setRuns] = useState<RunWithGame[]>([]);
+  const [replayData, setReplayData] = useState<RunWithGame | null>(null);
+  const [filters, setFilters] = useState<FilterState>({
+    search: "",
+    status: "all",
+    model: "all",
+    sortBy: "newest",
+  });
 
   const handleWebSocketMessage = useCallback((message: WebSocketMessage) => {
     switch (message.type) {
@@ -61,18 +73,15 @@ export default function Dashboard() {
     refetchOnMount: true,
   });
 
-  useQuery<AllRunsResponse>({
-    queryKey: ["/api/runs"],
-    enabled: runs.length === 0,
-  });
-
   const { data: initialRuns } = useQuery<AllRunsResponse>({
     queryKey: ["/api/runs"],
   });
 
-  if (initialRuns && runs.length === 0 && initialRuns.runs.length > 0) {
-    setRuns(initialRuns.runs);
-  }
+  useEffect(() => {
+    if (initialRuns && runs.length === 0 && initialRuns.runs.length > 0) {
+      setRuns(initialRuns.runs);
+    }
+  }, [initialRuns, runs.length]);
 
   const startRunMutation = useMutation({
     mutationFn: async (config: CreateRunRequest) => {
@@ -98,6 +107,22 @@ export default function Dashboard() {
     startRunMutation.mutate(config);
   };
 
+  const handleStartBatch = async (configs: CreateRunRequest[]) => {
+    toast({
+      title: "Starting Batch",
+      description: `Starting ${configs.length} benchmark runs...`,
+    });
+
+    for (const config of configs) {
+      try {
+        await apiRequest("POST", "/api/runs", config);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      } catch (error) {
+        console.error("Failed to start run:", error);
+      }
+    }
+  };
+
   const stats: StatsResponse = statsData || {
     totalRuns: 0,
     solvedCount: 0,
@@ -108,8 +133,50 @@ export default function Dashboard() {
     successRate: 0,
   };
 
-  const activeRuns = runs.filter((r) => r.run.status === "in_progress");
-  const completedRuns = runs.filter((r) => r.run.status !== "in_progress");
+  const modelOptions = useMemo(() => {
+    const models = new Set(runs.map((r) => r.run.modelId));
+    return Array.from(models);
+  }, [runs]);
+
+  const filteredRuns = useMemo(() => {
+    let result = [...runs];
+
+    if (filters.search) {
+      const searchLower = filters.search.toLowerCase();
+      result = result.filter(
+        (r) =>
+          r.run.modelId.toLowerCase().includes(searchLower) ||
+          r.run.runId.toLowerCase().includes(searchLower)
+      );
+    }
+
+    if (filters.status !== "all") {
+      result = result.filter((r) => r.run.status === filters.status);
+    }
+
+    if (filters.model !== "all") {
+      result = result.filter((r) => r.run.modelId === filters.model);
+    }
+
+    result.sort((a, b) => {
+      switch (filters.sortBy) {
+        case "oldest":
+          return new Date(a.run.createdAt).getTime() - new Date(b.run.createdAt).getTime();
+        case "moves_asc":
+          return a.game.moveCount - b.game.moveCount;
+        case "moves_desc":
+          return b.game.moveCount - a.game.moveCount;
+        case "newest":
+        default:
+          return new Date(b.run.createdAt).getTime() - new Date(a.run.createdAt).getTime();
+      }
+    });
+
+    return result;
+  }, [runs, filters]);
+
+  const activeRuns = filteredRuns.filter((r) => r.run.status === "in_progress");
+  const completedRuns = filteredRuns.filter((r) => r.run.status !== "in_progress");
 
   return (
     <div className="min-h-screen bg-background">
@@ -139,12 +206,36 @@ export default function Dashboard() {
       </header>
 
       <main className="max-w-screen-2xl mx-auto px-4 md:px-8 py-6 space-y-6">
-        <ConfigPanel
-          onStartRun={handleStartRun}
-          isStarting={startRunMutation.isPending}
-        />
+        <Tabs defaultValue="single" className="w-full">
+          <TabsList className="grid w-full max-w-md grid-cols-2" data-testid="tabs-config">
+            <TabsTrigger value="single">Single Run</TabsTrigger>
+            <TabsTrigger value="batch">Batch Run</TabsTrigger>
+          </TabsList>
+          <TabsContent value="single" className="mt-4">
+            <ConfigPanel
+              onStartRun={handleStartRun}
+              isStarting={startRunMutation.isPending}
+            />
+          </TabsContent>
+          <TabsContent value="batch" className="mt-4">
+            <BatchConfig
+              onStartBatch={handleStartBatch}
+              isStarting={startRunMutation.isPending}
+            />
+          </TabsContent>
+        </Tabs>
 
         <StatsBar stats={stats} isLoading={statsLoading} />
+
+        {runs.length > 0 && (
+          <AnalyticsPanel runs={runs} />
+        )}
+
+        <FilterBar
+          filters={filters}
+          onFiltersChange={setFilters}
+          modelOptions={modelOptions}
+        />
 
         {activeRuns.length > 0 && (
           <section>
@@ -198,12 +289,20 @@ export default function Dashboard() {
               data-testid="completed-games-grid"
             >
               {completedRuns.map((runData) => (
-                <GameCard key={runData.run.runId} data={runData} />
+                <GameCard
+                  key={runData.run.runId}
+                  data={runData}
+                  onReplay={setReplayData}
+                />
               ))}
             </div>
           )}
         </section>
       </main>
+
+      {replayData && (
+        <GameReplay data={replayData} onClose={() => setReplayData(null)} />
+      )}
     </div>
   );
 }
