@@ -16,7 +16,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
-import { ChevronDown, Play, Layers, Settings } from "lucide-react";
+import { ChevronDown, Play, Layers } from "lucide-react";
 import type { CreateRunRequest } from "@shared/schema";
 
 interface BatchConfigProps {
