@@ -137,3 +137,10 @@ export type WebSocketMessage =
   | { type: "run_updated"; data: RunWithGame }
   | { type: "run_completed"; data: RunWithGame }
   | { type: "stats_updated"; data: StatsResponse };
+
+// Schema for LLM move response
+export const moveResponseSchema = z.object({
+  move: z.enum(["up", "down", "left", "right"]),
+});
+
+export type MoveResponse = z.infer<typeof moveResponseSchema>;
