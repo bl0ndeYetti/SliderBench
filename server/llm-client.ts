@@ -5,7 +5,7 @@ import { moveResponseSchema } from "@shared/schema";
 
 const AI_GATEWAY_BASE_URL = process.env.AI_GATEWAY_BASE_URL || "https://ai-gateway.vercel.sh/v1";
 const AI_GATEWAY_API_KEY = process.env.AI_GATEWAY_API_KEY || "";
-const DEFAULT_MODEL_ID = process.env.DEFAULT_MODEL_ID || "openai/gpt-5-nano";
+const DEFAULT_MODEL_ID = process.env.DEFAULT_MODEL_ID || "openai/gpt-4o-mini";
 
 // Create OpenAI provider with custom baseURL for the gateway
 const openai = createOpenAI({
