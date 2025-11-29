@@ -78,11 +78,8 @@ export async function callLLMForMove(
     const parsedMove: MoveDirection = result.object.move;
 
     // Extract token usage from the result
-    const usage = result.usage as {
-      promptTokens?: number;
-      completionTokens?: number;
-      totalTokens?: number;
-    } | undefined;
+    // LanguageModelV2Usage has promptTokens, completionTokens properties
+    const usage = result.usage;
 
     return {
       requestId: crypto.randomUUID(),
@@ -91,9 +88,9 @@ export async function callLLMForMove(
       latencyMs,
       tokenUsage: usage
         ? {
-            promptTokens: usage.promptTokens,
-            completionTokens: usage.completionTokens,
-            totalTokens: usage.totalTokens,
+            promptTokens: (usage as any).promptTokens,
+            completionTokens: (usage as any).completionTokens,
+            totalTokens: (usage as any).totalTokens,
           }
         : undefined,
     };
