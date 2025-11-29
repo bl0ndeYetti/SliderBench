@@ -10,7 +10,6 @@ import {
   PieChart,
   Pie,
   Cell,
-  Legend,
 } from "recharts";
 import { BarChart2, PieChart as PieChartIcon, TrendingUp, Clock } from "lucide-react";
 import type { RunWithGame } from "@shared/schema";
