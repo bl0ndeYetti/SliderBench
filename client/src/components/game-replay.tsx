@@ -14,7 +14,7 @@ import {
   X,
   RotateCcw
 } from "lucide-react";
-import type { RunWithGame, Move, Board } from "@shared/schema";
+import type { RunWithGame, MoveRecord, Board } from "@shared/schema";
 
 interface GameReplayProps {
   data: RunWithGame;
@@ -64,12 +64,12 @@ function applyMove(board: Board, direction: string): Board {
   return newBoard;
 }
 
-function reconstructBoardAtStep(initialBoard: Board, moves: Move[], step: number): Board {
+function reconstructBoardAtStep(initialBoard: Board, moves: MoveRecord[], step: number): Board {
   let board = initialBoard.map((row) => [...row]);
   
   for (let i = 0; i < step; i++) {
-    if (moves[i] && moves[i].isLegal) {
-      board = applyMove(board, moves[i].direction);
+    if (moves[i] && moves[i].isLegal && moves[i].suggestedMove) {
+      board = applyMove(board, moves[i].suggestedMove!);
     }
   }
   
@@ -163,9 +163,9 @@ export function GameReplay({ data, onClose }: GameReplayProps) {
               <span className="text-muted-foreground">
                 Step {currentStep} of {maxStep}
               </span>
-              {currentMove && (
+              {currentMove && currentMove.suggestedMove && (
                 <Badge variant="outline" className="font-mono text-xs">
-                  Move: {currentMove.direction}
+                  Move: {currentMove.suggestedMove}
                 </Badge>
               )}
             </div>
